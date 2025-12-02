@@ -13,8 +13,11 @@ class EnvPMSM(gym.Env):
         self.lambda_PM = sys_params["lambda_PM"]    # Flux-linkage due to permanent magnets [Wb]
         self.we     = sys_params["we"]              # Nominal speed [rad/s]
         self.vdc    = sys_params["vdc"]             # DC bus voltage [V]
+        # Group1: Added system parameters
+        self.p      = sys_params["p"]               # Number of pole pairs
+        self.torque_max = sys_params["torque_max"]  # Maximum torque [Nm]
         
-        # Maximum amount of simulation steps
+        # Maximum amount of simulation steps ds
         self.max_steps = sys_params["sim_steps"]
         
         # Maximum voltage [V]
@@ -26,6 +29,8 @@ class EnvPMSM(gym.Env):
         # Reference values
         self.id_ref = sys_params["id_ref"]
         self.iq_ref = sys_params["iq_ref"]
+        # Group1: Added torque reference
+        self.torque_ref = sys_params["torque_ref"]
 
         # Initial values
         self.id0 = 0
@@ -52,12 +57,14 @@ class EnvPMSM(gym.Env):
         # Observations
         self.min_id,     self.max_id     = [-1.0, 1.0]
         self.min_iq,     self.max_iq     = [-1.0, 1.0]
+        # Group1: Added torque observation limits
+        self.min_torque, self.max_torque = [-1.0, 1.0] # Normalized torque limits
 
         self.low_observations = np.array(
-            [self.min_id, self.min_iq], dtype=np.float32
+            [self.min_id, self.min_iq, self.min_torque], dtype=np.float32
         )
         self.high_observations = np.array(
-            [self.max_id, self.max_iq], dtype=np.float32
+            [self.max_id, self.max_iq, self.max_torque], dtype=np.float32
         )
 
         # Render mode
@@ -95,8 +102,14 @@ class EnvPMSM(gym.Env):
         # Normalize observation
         id_next_norm = id_next / self.i_max
         iq_next_norm = iq_next / self.i_max
-        # Observation: [id, iq]
-        obs = np.array([id_next_norm + e, iq_next_norm + e], dtype=np.float32)
+        
+        # Group1: Calculate current torque for observation
+        self.torque = self.__calculate_torque(id_next + e, iq_next + e)
+        torque_next_norm = self.torque / self.torque_max
+
+        # Group1: Added torque to observation
+        # Observation: [id, iq, torque]
+        obs = np.array([id_next_norm + e, iq_next_norm + e, torque_next_norm], dtype=np.float32)
 
         terminated = True if self.steps == self.max_steps - 1 else False
 
@@ -107,8 +120,25 @@ class EnvPMSM(gym.Env):
         iq_ref_norm = self.iq_ref / self.i_max
         e_id = np.abs(id_norm - id_ref_norm)
         e_iq = np.abs(iq_norm - iq_ref_norm)
-
+        
         reward = -(e_id + e_iq)
+
+        # Group1: Torque reward function
+        self.torque = self.__calculate_torque(self.id + e, self.iq + e)
+        torque_norm = self.torque / self.torque_max
+        torque_ref_norm = self.torque_ref / self.torque_max
+        e_torque = np.abs(torque_norm - torque_ref_norm)
+
+        R_tracking = -e_torque
+
+        # Group1: MTPA reward function
+        I_dq = np.sqrt((self.id + e)**2 + (self.iq + e)**2)
+        I_dq_norm = I_dq / self.i_max
+        R_MTPA = -I_dq_norm
+
+        # Group1: Total reward
+        alpha =  0 # Weighting factor for MTPA
+        reward = R_tracking + alpha*R_MTPA
 
         # Update states
         self.id = id_next
@@ -132,7 +162,11 @@ class EnvPMSM(gym.Env):
         self.id = self.i_max * id_norm
         self.iq = self.i_max * iq_norm
 
-        obs = np.array([id_norm, iq_norm], dtype=np.float32)
+        # Group1: Calculate initial torque
+        torque_init = self.__calculate_torque(self.id, self.iq)
+        torque_init_norm = torque_init / self.torque_max
+
+        obs = np.array([id_norm, iq_norm, torque_init_norm], dtype=np.float32)
 
         return obs, {}
     
@@ -162,3 +196,8 @@ class EnvPMSM(gym.Env):
         self.bd = bdw[:,:b.shape[1]]
         self.wd = bdw[:,b.shape[1]:].squeeze()
         self.cd = cd
+
+    # Group1: Calculate electromagnetic torque
+    def __calculate_torque(self, id, iq):
+        torque = (3/2) * self.p * (self.lambda_PM * iq + (self.ld - self.lq) * id * iq)
+        return torque
