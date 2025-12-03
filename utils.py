@@ -7,129 +7,165 @@ from IPython.display import clear_output
 
 # Column names
 columns = pd.MultiIndex.from_tuples([
-            ("Error", "Absolute [Nm]"),
+            ("Error", "Absolute [Nm]"),  # Group1: Changed from [A] to [Nm]
             ("Error", "Relative [%]"),
             ("Error", "SSE"),
             ("", "Control energy"),
-            ("Settling time [ms]", "Torque"),
-            ("Overshoot [%]", "Torque"),
-            ("Undershoot [%]", "Torque"),
+            ("Settling time [ms]", "Torque"),  # Group1: Changed from Id, Iq to torque
+            ("Overshoot [%]", "Torque"),       # Group1: Changed from Id, Iq to torque
+            ("Undershoot [%]", "Torque"),      # Group1: Changed from Id, Iq to torque
             ("Computation time [ms]", "Min"),
             ("Computation time [ms]", "Max"),
             ("Computation time [ms]", "Avg")])
 
 class Metrics:
-    def __init__(self, idq_ref, dt, p=4, lambda_PM=0.172312604, ld=0.91e-3, lq=1.17e-3):
-        self.dt = dt                        # Simulation step time [s]
-        self.idq_ref = np.array(idq_ref)    # Reference currents in dq-axis [A]
-        self.p = p                          # Number of pole pairs
-        self.lambda_PM = lambda_PM          # Flux-linkage [Wb]
-        self.ld = ld                        # D-axis inductance [H]
-        self.lq = lq                        # Q-axis inductance [H]
-        
-        # Calculate reference torque
-        self.torque_ref = (3/2) * p * (lambda_PM * idq_ref[1] + (ld - lq) * idq_ref[0] * idq_ref[1])
+    def __init__(self, torque_ref, dt):  # Group1: Changed idq_ref to torque_ref
+        self.dt = dt                     # Simulation step time [s]
+        self.torque_ref = torque_ref     # Group1: Reference torque [Nm]
 
+        # Group1: No longer needed because we are tracking torque only (scalar).
+        # They were used because idq_ref was a vector.
         # Function for matrix-vector substraction and division
-        self.mv_sub = lambda matrix, vector: (matrix.transpose() - vector).transpose()
-        self.mv_div = lambda matrix, vector: (matrix.transpose() / vector).transpose()
+        # self.mv_sub = lambda matrix, vector: (matrix.transpose() - vector).transpose()
+        # self.mv_div = lambda matrix, vector: (matrix.transpose() / vector).transpose()
 
-    def calculate_torque(self, idq):
-        """Calculate torque from dq currents"""
-        id_history = idq[0]
-        iq_history = idq[1]
-        torque = (3/2) * self.p * (self.lambda_PM * iq_history + (self.ld - self.lq) * id_history * iq_history)
-        return torque
-
-    def error_r(self, idq):
-        torque = self.calculate_torque(idq)
-        error = np.abs(torque[-5:] - self.torque_ref)
-        return 1/5 * np.sum(error / np.abs(self.torque_ref))
+    # Group1: OLD
+    # def error_r(self, idq):
+    #     return 1/5*np.sum(self.mv_div(np.abs(self.mv_sub(idq[:,-5:], self.idq_ref)), self.idq_ref))
     
-    def error(self, idq):
-        torque = self.calculate_torque(idq)
+    # def error(self, idq):
+    #     return 1/5*np.sum(np.abs(self.mv_sub(idq[:,-5:], self.idq_ref)))
+    
+    # def sse(self, idq):
+    #     return np.sum(self.mv_sub(idq, self.idq_ref)**2)
+    
+    # Group1: NEW
+    def error_r(self, torque):
+        # Relative error based on last 5 torque values
+        return 1/5 * np.sum(np.abs(torque[-5:] - self.torque_ref) / self.torque_ref)
+    
+    def error(self, torque):
+        # Absolute error based on last 5 torque values
         return 1/5 * np.sum(np.abs(torque[-5:] - self.torque_ref))
     
-    def sse(self, idq):
-        torque = self.calculate_torque(idq)
+    def sse(self, torque):
+        # Sum of squared errors for entire torque history
         return np.sum((torque - self.torque_ref)**2)
     
     def control_energy(self, vdq):
         return self.dt * np.sum(vdq**2)
     
-    # ...existing code...
+    # def settling_time(self, idq, sim_plot_steps):
+    #     # Define tolerance band
+    #     tolerance = 0.02
+    #     tolerance = 0.1
+    #     tolerance_band = np.abs(tolerance * self.idq_ref)
+
+    #     # Utilize the flipped version if idq and calculate its error
+    #     idq_flip = np.flip(idq, 1)
+    #     error = np.abs(self.mv_sub(idq_flip, self.idq_ref))
+
+    #     # Search for the index where the error gets out of bounds
+    #     index = sim_plot_steps - np.argwhere(error.transpose() >= tolerance_band)[0:2][:,0]
+        
+    #     # Utilize the index to return the settling time
+    #     time = self.dt * index
+        
+    #     return time
+    
     def settling_time(self, time_vec, signal, stability_threshold=0.05, window_percent=10):
         """
-        Estimates settling time from torque (converted from idq currents).
-        Returns:
-          - settling_time (float, seconds) for the torque channel (or np.nan if not found)
-          - viz_data (dict) for plotting/debug (moving_avg, moving_std, settling_index)
-        """
-        # Convert idq to torque if signal is 2D (id, iq)
-        if signal.shape[0] == 2:
-            torque = self.calculate_torque(signal)
-            signal = torque.reshape(1, -1)
+        Estimates the settling time for one or more signals by analyzing the
+        stability of their moving average and moving standard deviation.
 
+        Args:
+            time_vec (np.ndarray): The 1D time vector corresponding to the signals.
+            signal (np.ndarray): The signal data. Can be a 1D array for a single
+                                signal, or a 2D array where each column is a
+                                separate signal.
+            stability_threshold (float): The threshold for the rate of change of
+                                        the statistics. A smaller value means a
+                                        stricter definition of "stable".
+            window_percent (int): The size of the moving window as a percentage
+                                of the total signal length.
+
+        Returns:
+            tuple: A tuple containing:
+                - np.ndarray: An array of estimated settling times (one per channel).
+                            Contains None for channels that never settle.
+                - list: A list of dictionaries, each containing the visualization
+                        data ('moving_avg', 'moving_std', 'settling_index') for
+                        the corresponding channel.
+        """
         if len(signal.shape) == 1:
-            signal = signal.reshape(1, -1)
+            # If a 1D array is passed, reshape it to a 2D array with one column
+            signal = signal.reshape(-1, 1)
 
         if signal.shape[1] != len(time_vec):
-            raise ValueError("Signal and time vector must have the same number of samples.")
+            raise ValueError("Signal and time vector must have the same number of samples (rows).")
 
-        # We'll compute settling for the (first) channel and return a single scalar
-        s = pd.Series(signal[0, :])
+        n_channels = signal.shape[0]
+        settling_times = []
+        viz_data_list = []
 
-        window_size = int((window_percent / 100) * len(s))
-        if window_size < 2:
-            window_size = 2
+        # --- Iterate over each channel (column) in the signal array ---
+        for i in range(n_channels):
+            current_signal = signal[i, :]
+            s = pd.Series(current_signal)
 
-        moving_avg = s.rolling(window=window_size, center=True).mean()
-        moving_std = s.rolling(window=window_size, center=True).std()
+            # --- 1. Calculate window size ---
+            window_size = int((window_percent / 100) * len(s))
+            if window_size < 2:
+                window_size = 2
 
-        moving_avg.fillna(method='bfill', inplace=True)
-        moving_avg.fillna(method='ffill', inplace=True)
-        moving_std.fillna(method='bfill', inplace=True)
-        moving_std.fillna(method='ffill', inplace=True)
+            # --- 2. Calculate moving statistics ---
+            moving_avg = s.rolling(window=window_size, center=True).mean()
+            moving_std = s.rolling(window=window_size, center=True).std()
+            
+            moving_avg.fillna(method='bfill', inplace=True)
+            moving_avg.fillna(method='ffill', inplace=True)
+            moving_std.fillna(method='bfill', inplace=True)
+            moving_std.fillna(method='ffill', inplace=True)
 
-        signal_abs_mean = np.mean(np.abs(signal[0, :]))
-        if signal_abs_mean < 1e-9:
-            signal_abs_mean = 1.0
+            # --- 3. Calculate the rate of change ---
+            signal_abs_mean = np.mean(np.abs(current_signal))
+            if signal_abs_mean < 1e-9: signal_abs_mean = 1.0
 
-        avg_rate_of_change = np.abs(np.diff(moving_avg) / signal_abs_mean)
-        std_rate_of_change = np.abs(np.diff(moving_std) / signal_abs_mean)
+            avg_rate_of_change = np.abs(np.diff(moving_avg) / signal_abs_mean)
+            std_rate_of_change = np.abs(np.diff(moving_std) / signal_abs_mean)
 
-        is_unstable = (avg_rate_of_change > stability_threshold) | (std_rate_of_change > stability_threshold)
-        unstable_indices = np.where(is_unstable)[0]
+            # --- 4. Find where the signal becomes stable ---
+            is_unstable = (avg_rate_of_change > stability_threshold) | \
+                        (std_rate_of_change > stability_threshold)
+            
+            unstable_indices = np.where(is_unstable)[0]
 
-        if len(unstable_indices) == 0:
-            settling_index = window_size
-        else:
-            settling_index = unstable_indices[-1] + 1
+            if len(unstable_indices) == 0:
+                settling_index = window_size
+            else:
+                settling_index = unstable_indices[-1] + 1
+            
+            if settling_index >= len(time_vec):
+                settling_time = None
+            else:
+                settling_time = time_vec[settling_index]
+            
+            settling_times.append(settling_time)
+            
+            viz_data = {
+                'moving_avg': moving_avg.to_numpy(),
+                'moving_std': moving_std.to_numpy(),
+                'settling_index': settling_index
+            }
+            viz_data_list.append(viz_data)
 
-        if settling_index >= len(time_vec):
-            settling_time = np.nan
-        else:
-            settling_time = time_vec[settling_index]
-
-        viz_data = {
-            'moving_avg': moving_avg.to_numpy(),
-            'moving_std': moving_std.to_numpy(),
-            'settling_index': settling_index
-        }
-
-        return float(settling_time), viz_data
+        return np.array(settling_times), viz_data_list
 
     def overshoot(self, idq):
-        torque = self.calculate_torque(idq)
-        max_torque = np.max(torque)
-        overshoot_val = 100 * np.abs((max_torque - self.torque_ref) / self.torque_ref) if np.abs(max_torque) > np.abs(self.torque_ref) else np.nan
-        return overshoot_val   # return single scalar
+        return np.array([100*np.abs((np.max(i)-iref)/iref) if np.abs(np.max(i)) > np.abs(iref) else np.nan for i, iref in zip(idq, self.idq_ref)])
     
     def undershoot(self, idq):
-        torque = self.calculate_torque(idq)
-        min_torque = np.min(torque)
-        undershoot_val = 100 * np.abs((min_torque - self.torque_ref) / self.torque_ref) if np.abs(min_torque) < np.abs(self.torque_ref) else np.nan
-        return undershoot_val  # return single scalar
+        return np.array([100*np.abs((np.min(i)-iref)/iref) if np.abs(np.min(i)) < np.abs(i0) else np.nan for i, i0, iref in zip(idq, idq[:,0], self.idq_ref)])
     
     def computation_time(self, controller, controller_inputs):
         start_time = time.perf_counter()
@@ -148,24 +184,16 @@ def plot_results(subplot, env, time, computation_time_ms, id_history, iq_history
 
     fignum = [1 + col_index + r * cols for r in range(rows)]
 
-    # Calculate torque from dq currents
-    # Torque = (3/2) * p * (lambda_PM * iq + (Ld - Lq) * id * iq)
-    p = env.p  # Number of pole pairs
-    lambda_PM = env.lambda_PM
-    ld = env.ld
-    lq = env.lq
-    
-    torque_history = (3/2) * p * (lambda_PM * iq_history + (ld - lq) * id_history * iq_history)
-    torque_ref = (3/2) * p * (lambda_PM * env.iq_ref + (ld - lq) * env.id_ref * env.iq_ref)
-
     plt.subplot(rows, cols, fignum[0])
-    plt.plot(time*1000, torque_history, label='Torque', linewidth=2)
-    plt.plot(time*1000, np.ones_like(time)*torque_ref, '--', label='Torque ref', linewidth=2)
+    plt.plot(time*1000, id_history, label='id')
+    plt.plot(time*1000, np.ones_like(time)*env.id_ref, '--', label='id_ref')
+    plt.plot(time*1000, iq_history, label='iq')
+    plt.plot(time*1000, np.ones_like(time)*env.iq_ref, '--', label='iq_ref')
     plt.grid(True)
     plt.legend()
     plt.xlabel('Time [ms]')
-    plt.ylabel('Torque [Nm]')
-    plt.title('Torque dynamic behaviour')
+    plt.ylabel('Current [A]')
+    plt.title('Current dynamic behaviour')
     
     plt.subplot(rows, cols, fignum[1])
     plt.plot(time*1000, vd_history, label='vd')
@@ -229,6 +257,8 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
         iq_history = np.zeros(sim_steps)
         vd_history = np.zeros(sim_steps)
         vq_history = np.zeros(sim_steps)
+        # Group1: Add torque_history array to store torque values from environment observation
+        torque_history = np.zeros(sim_steps)
         
         # Run simulation
         if controller_type == "SB3":
@@ -242,6 +272,11 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
 
             reference = np.array([id_ref, iq_ref])
             state = state_norm * base_env.i_max
+            # Group1: I think this now gives:
+            # state[0] = id
+            # state[1] = iq
+            # state[2] = torque
+            # Because the environment observation space was modified to include torque (obs)
 
             if controller_type == "QL":
                 discrete_action = controller.greedy_policy(discrete_state)
@@ -271,7 +306,7 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 action = action_norm.flatten() * base_env.vdq_max
 
             if controller_type == "PI":
-                controller_inputs = {"reference": reference, "measured": state} # Group1: For now state should be state[:2]
+                controller_inputs = {"reference": reference, "measured": state}
                 action, comp_time_ms = metrics.computation_time(controller.control, controller_inputs)
                 # action = controller.control(reference, state)
                 action += decouple(env=base_env)
@@ -281,7 +316,7 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 state = state_norm * base_env.i_max
 
             elif controller_type == "MPC":
-                controller_inputs = {"x": state, "y": state, "yref": reference} # Group1: For now state should be state[:2]
+                controller_inputs = {"x": state, "y": state, "yref": reference}
                 action, comp_time_ms = metrics.computation_time(controller.compute_input, controller_inputs)
                 # action = controller.compute_input(x=state, y=state, yref=reference)
                 action_norm = action / base_env.vdq_max
@@ -295,6 +330,9 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
             iq_history[step] = state[1]
             vd_history[step] = action[0]
             vq_history[step] = action[1]
+            # Group1: Store torque from state[2], the environment already calculates and provides torque 
+            # in the observation vector, so we just extract it directly
+            torque_history[step] = state[2]
 
             if controller_type != "SB3":
                 done = terminated or truncated
@@ -328,9 +366,9 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
             error, 
             sse, 
             control_energy, 
-            settling_time_ms, 
-            overshoot, 
-            undershoot, 
+            *settling_time_ms, 
+            *overshoot, 
+            *undershoot, 
             min_computation_time, 
             max_computation_time, 
             avg_computation_time
