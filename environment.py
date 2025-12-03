@@ -124,7 +124,7 @@ class EnvPMSM(gym.Env):
         reward = -(e_id + e_iq)
 
         # Group1: Torque reward function
-        self.torque = self.__calculate_torque(self.id + e, self.iq + e)
+        # self.torque = self.__calculate_torque(self.id + e, self.iq + e)
         torque_norm = self.torque / self.torque_max
         torque_ref_norm = self.torque_ref / self.torque_max
         e_torque = np.abs(torque_norm - torque_ref_norm)
