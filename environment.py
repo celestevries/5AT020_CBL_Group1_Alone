@@ -27,10 +27,24 @@ class EnvPMSM(gym.Env):
         self.i_max  = sys_params["i_max"]
 
         # Reference values
-        self.id_ref = sys_params["id_ref"]
-        self.iq_ref = sys_params["iq_ref"]
-        # Group1: Added torque reference
+        # self.id_ref = sys_params["id_ref"]
+        # self.iq_ref = sys_params["iq_ref"]
+
+        # Group1: Torque reference
         self.torque_ref = sys_params["torque_ref"]
+        
+        # Group1: Calculate id_ref and iq_ref from torque_ref
+        # Using: id = 0, solve for iq
+        # Torque equation: T = (3/2) * p * lambda_PM * iq  (when id = 0)
+        self.id_ref = 0.0
+        self.iq_ref = (2 * self.torque_ref) / (3 * self.p * self.lambda_PM)
+        
+        # Override with user-provided values if they exist in sys_params
+        # This allows manual override for testing/comparison
+        if "id_ref" in sys_params:
+            self.id_ref = sys_params["id_ref"]
+        if "iq_ref" in sys_params:
+            self.iq_ref = sys_params["iq_ref"]
 
         # Initial values
         self.id0 = 0

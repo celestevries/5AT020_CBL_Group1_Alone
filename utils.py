@@ -99,7 +99,11 @@ class Metrics:
         """
         if len(signal.shape) == 1:
             # If a 1D array is passed, reshape it to a 2D array with one column
-            signal = signal.reshape(-1, 1)
+            # signal = signal.reshape(-1, 1)
+
+            # Group1: If a 1D array is passed, reshape it to a 2D array with one row
+            # Changed from reshape(-1, 1) to reshape(1, -1)
+            signal = signal.reshape(1, -1)
 
         if signal.shape[1] != len(time_vec):
             raise ValueError("Signal and time vector must have the same number of samples (rows).")
@@ -161,11 +165,23 @@ class Metrics:
 
         return np.array(settling_times), viz_data_list
 
-    def overshoot(self, idq):
-        return np.array([100*np.abs((np.max(i)-iref)/iref) if np.abs(np.max(i)) > np.abs(iref) else np.nan for i, iref in zip(idq, self.idq_ref)])
+    # Group1: OLD
+    # def overshoot(self, idq):
+    #     return np.array([100*np.abs((np.max(i)-iref)/iref) if np.abs(np.max(i)) > np.abs(iref) else np.nan for i, iref in zip(idq, self.idq_ref)])
     
-    def undershoot(self, idq):
-        return np.array([100*np.abs((np.min(i)-iref)/iref) if np.abs(np.min(i)) < np.abs(i0) else np.nan for i, i0, iref in zip(idq, idq[:,0], self.idq_ref)])
+    # def undershoot(self, idq):
+    #     return np.array([100*np.abs((np.min(i)-iref)/iref) if np.abs(np.min(i)) < np.abs(i0) else np.nan for i, i0, iref in zip(idq, idq[:,0], self.idq_ref)])
+    
+    # Group1: NEW
+    # We dont need 'for i, iref in zip(idq, self.idq_ref)]' because torque is a scalar (zip creates pairs, so you cna loop through them together)
+    def overshoot(self, torque):
+        max_torque = np.max(torque)
+        return 100 * np.abs((max_torque - self.torque_ref) / self.torque_ref) if np.abs(max_torque) > np.abs(self.torque_ref) else np.nan
+    
+    def undershoot(self, torque):
+        min_torque = np.min(torque)
+        initial_torque = torque[0]
+        return 100 * np.abs((min_torque - self.torque_ref) / self.torque_ref) if np.abs(min_torque) < np.abs(initial_torque) else np.nan
     
     def computation_time(self, controller, controller_inputs):
         start_time = time.perf_counter()
@@ -179,21 +195,21 @@ class Metrics:
 def skip(line, cell):
     return
 
-def plot_results(subplot, env, time, computation_time_ms, id_history, iq_history, vd_history, vq_history):
+# Group1: Changed plot_results to plot torque instead of currents
+def plot_results(subplot, env, time, computation_time_ms, id_history, iq_history, torque_history, vd_history, vq_history):
     rows, cols, col_index = subplot
 
     fignum = [1 + col_index + r * cols for r in range(rows)]
 
+    # Group1: Needed to change only first subplot
     plt.subplot(rows, cols, fignum[0])
-    plt.plot(time*1000, id_history, label='id')
-    plt.plot(time*1000, np.ones_like(time)*env.id_ref, '--', label='id_ref')
-    plt.plot(time*1000, iq_history, label='iq')
-    plt.plot(time*1000, np.ones_like(time)*env.iq_ref, '--', label='iq_ref')
+    plt.plot(time*1000, torque_history, label='torque')
+    plt.plot(time*1000, np.ones_like(time)*env.torque_ref, '--', label='torque_ref')
     plt.grid(True)
     plt.legend()
     plt.xlabel('Time [ms]')
-    plt.ylabel('Current [A]')
-    plt.title('Current dynamic behaviour')
+    plt.ylabel('Torque [Nm]')
+    plt.title('Torque Tracking')
     
     plt.subplot(rows, cols, fignum[1])
     plt.plot(time*1000, vd_history, label='vd')
@@ -213,6 +229,7 @@ def plot_results(subplot, env, time, computation_time_ms, id_history, iq_history
 
     plt.tight_layout()
 
+# Group1: To compensate fro cross-coupling between d- and q-axis I think. Don't change.
 def decouple(env):
     Vd_ff = -env.we * env.lq * env.iq
     Vq_ff = env.we * (env.ld * env.id + env.lambda_PM)
@@ -305,10 +322,16 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 state = state_norm.flatten() * base_env.i_max
                 action = action_norm.flatten() * base_env.vdq_max
 
+            # Group1: PI and MPC now use indirect torque control. They now track id_ref and iq_ref 
+            # (calculated from torque_ref in environment.py), and torque follows automatically
+            # via T = 1.5*p*[λ_PM*iq + (Ld-Lq)*id*iq].
+
             if controller_type == "PI":
-                controller_inputs = {"reference": reference, "measured": state}
+                # Group1: PI controller uses only [id, iq], not torque (changed state -> state[:2])
+                # state = [id, iq, torque], but PI needs only [id, iq]
+                controller_inputs = {"reference": reference, "measured": state[:2]}
                 action, comp_time_ms = metrics.computation_time(controller.control, controller_inputs)
-                # action = controller.control(reference, state)
+                # action = controller.control(reference, state[:2])
                 action += decouple(env=base_env)
                 action_norm = action / base_env.vdq_max
                 # Apply action and get new state
@@ -316,9 +339,11 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 state = state_norm * base_env.i_max
 
             elif controller_type == "MPC":
-                controller_inputs = {"x": state, "y": state, "yref": reference}
+                # Group1: MPC controller uses only [id, iq], not torque (changed state -> state[:2])
+                # state = [id, iq, torque], but MPC needs only [id, iq]
+                controller_inputs = {"x": state[:2], "y": state[:2], "yref": reference}
                 action, comp_time_ms = metrics.computation_time(controller.compute_input, controller_inputs)
-                # action = controller.compute_input(x=state, y=state, yref=reference)
+                # action = controller.compute_input(x=state[:2], y=state[:2], yref=reference)
                 action_norm = action / base_env.vdq_max
                 # Apply action and get new state
                 state_norm, _, terminated, truncated , _ = env.step(action_norm)
@@ -343,32 +368,41 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
             step += 1
         
         if plot:
-            plot_results((3,len(envs),idx), base_env, time, computation_time_ms, id_history, iq_history, vd_history, vq_history)
+            # Group1: Added torque_history
+            plot_results((3,len(envs),idx), base_env, time, computation_time_ms, id_history, iq_history, torque_history, vd_history, vq_history)
 
-        idq = np.array([id_history, iq_history])
+        idq = np.array([id_history, iq_history]) # Group1: Not used anymore
         vdq = np.array([vd_history, vq_history])
 
-        # Metrics
-        error_r         = metrics.error_r(idq)
-        error           = metrics.error(idq)
-        sse             = metrics.sse(idq)
+        # Group1: Changed to use torque_history instead of idq
+        error_r         = metrics.error_r(torque_history)
+        error           = metrics.error(torque_history)
+        sse             = metrics.sse(torque_history)
+
         control_energy  = metrics.control_energy(vdq)
-        settling_time, _ = metrics.settling_time(time, idq)
-        settling_time_ms= 1e3*settling_time    # [ms]
-        overshoot       = metrics.overshoot(idq)            # dq
-        undershoot      = metrics.undershoot(idq)           # dq
+
+        # Group1: Changed to use torque_history instead of idq
+        settling_time, _ = metrics.settling_time(time, torque_history) # Array with just one value
+        settling_time_ms= 1e3*settling_time[0] # Scalar x scalar = scalar
+        overshoot       = metrics.overshoot(torque_history)
+        undershoot      = metrics.undershoot(torque_history)
+
         min_computation_time = np.min(computation_time_ms)
         max_computation_time = np.max(computation_time_ms)
         avg_computation_time = np.mean(computation_time_ms)
 
+        # Group1: No more * unpacking since torque metrics return scalars (not arrays)
         table_data.append([
             error_r, 
             error, 
             sse, 
             control_energy, 
-            *settling_time_ms, 
-            *overshoot, 
-            *undershoot, 
+            # *settling_time_ms, 
+            # *overshoot, 
+            # *undershoot, 
+            settling_time_ms,   # Single value (not array)
+            overshoot,          # Single value (not array)
+            undershoot,         # Single value (not array)
             min_computation_time, 
             max_computation_time, 
             avg_computation_time
