@@ -116,6 +116,15 @@ class MPCController:
         
         # du = solve_qp(Q,q,M,n, solver="osqp")
         du = solve_qp(Q,q, solver="osqp")
+
+        # Group1: solve_qp uses G and h for inequality constraints (G @ x <= h)
+        # M @ du <= n is the constraint format from restriction_matrices
+        du = solve_qp(Q, q, G=M, h=n, solver="osqp")
+        #if du is None:
+            # If solver fails, return zero control change
+        #    du = np.zeros(self.n_du * self.N)
+        
+
         u  = np.array([du[0:2]]).T + self.u_old;
         self.u_old = u;
 
