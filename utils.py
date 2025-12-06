@@ -41,12 +41,12 @@ class Metrics:
     
     # Group1: NEW
     def error_r(self, torque):
-        # Relative error based on last 5 torque values
-        return 1/5 * np.sum(np.abs(torque[-5:] - self.torque_ref) / self.torque_ref)
+        # Relative error: Mean absolute percentage error over entire trajectory (in %)
+        return 100 * np.mean(np.abs((torque - self.torque_ref) / self.torque_ref))
     
     def error(self, torque):
-        # Absolute error based on last 5 torque values
-        return 1/5 * np.sum(np.abs(torque[-5:] - self.torque_ref))
+        # Absolute error: Mean absolute error over entire trajectory
+        return np.mean(np.abs(torque - self.torque_ref))
     
     def sse(self, torque):
         # Sum of squared errors for entire torque history
@@ -288,12 +288,15 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
         while not done and step < sim_steps:
 
             reference = np.array([id_ref, iq_ref])
-            state = state_norm * base_env.i_max
-            # Group1: I think this now gives:
-            # state[0] = id
-            # state[1] = iq
-            # state[2] = torque
-            # Because the environment observation space was modified to include torque (obs)
+
+            # Group1: Denormalize state components correctly
+            # state_norm = [id_norm, iq_norm, torque_norm]
+            # id and iq are normalized by i_max, but torque is normalized by torque_max
+            state = np.array([
+                state_norm[0] * base_env.i_max,      # id
+                state_norm[1] * base_env.i_max,      # iq
+                state_norm[2] * base_env.torque_max  # torque
+            ])
 
             if controller_type == "QL":
                 discrete_action = controller.greedy_policy(discrete_state)
@@ -301,7 +304,14 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 discrete_state, reward, terminated, truncated, _ = env.step(discrete_action)
                 action_norm = env.get_continuous_action()
                 state_norm = env.get_continuous_state()
-                state = state_norm * env.i_max
+
+                # Group1: Denormalize state components
+                state = np.array([
+                    state_norm[0] * env.i_max,
+                    state_norm[1] * env.i_max,
+                    state_norm[2] * env.torque_max
+                ])
+
                 action = action_norm * env.vdq_max
 
             if controller_type == "SB3":
@@ -310,7 +320,15 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 (action_norm, _states), comp_time_ms = metrics.computation_time(controller.predict, controller_inputs)
                 # action_norm, _states = controller.predict(state_norm)
                 state_norm, _, done , _ = env.step(action_norm)
-                state = state_norm.flatten() * base_env.i_max
+                state_norm_flat = state_norm.flatten()
+
+                # Group1: Denormalize state components
+                state = np.array([
+                    state_norm_flat[0] * base_env.i_max,
+                    state_norm_flat[1] * base_env.i_max,
+                    state_norm_flat[2] * base_env.torque_max
+                ])
+
                 action = action_norm.flatten() * base_env.vdq_max
 
             if controller_type == "RL":
@@ -319,7 +337,15 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 action_norm, comp_time_ms = metrics.computation_time(controller.select_action, controller_inputs)
                 # action_norm, _states = controller.predict(state_norm)
                 state_norm, _, terminated, truncated , _= env.step(action_norm)
-                state = state_norm.flatten() * base_env.i_max
+                state_norm_flat = state_norm.flatten()
+
+                # Group1: Denormalize state components
+                state = np.array([
+                    state_norm_flat[0] * base_env.i_max,
+                    state_norm_flat[1] * base_env.i_max,
+                    state_norm_flat[2] * base_env.torque_max
+                ])
+
                 action = action_norm.flatten() * base_env.vdq_max
 
             # Group1: PI and MPC now use indirect torque control. They now track id_ref and iq_ref 
@@ -336,7 +362,11 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 action_norm = action / base_env.vdq_max
                 # Apply action and get new state
                 state_norm, _, terminated, truncated , _ = env.step(action_norm)
-                state = state_norm * base_env.i_max
+                state = np.array([
+                    state_norm[0] * base_env.i_max,
+                    state_norm[1] * base_env.i_max,
+                    state_norm[2] * base_env.torque_max
+                ])
 
             elif controller_type == "MPC":
                 # Group1: MPC controller uses only [id, iq], not torque (changed state -> state[:2])
@@ -347,7 +377,11 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
                 action_norm = action / base_env.vdq_max
                 # Apply action and get new state
                 state_norm, _, terminated, truncated , _ = env.step(action_norm)
-                state = state_norm * base_env.i_max
+                state = np.array([
+                    state_norm[0] * base_env.i_max,
+                    state_norm[1] * base_env.i_max,
+                    state_norm[2] * base_env.torque_max
+                ])
 
             # Store data
             computation_time_ms[step] = comp_time_ms
@@ -393,8 +427,8 @@ def run_simulation(envs, controller, controller_type, metrics, figsize, sim_step
 
         # Group1: No more * unpacking since torque metrics return scalars (not arrays)
         table_data.append([
-            error_r, 
-            error, 
+            error,      # Absolute error [Nm] -> 1st column
+            error_r,    # Relative error [%] -> 2nd column
             sse, 
             control_energy, 
             # *settling_time_ms, 
@@ -433,7 +467,7 @@ class Logger:
         
         # Logger settings
         self.log_interval = 100  # Print logs every log_interval timesteps
-        self.window = 20         # Use this many items from recent logs
+        self.window = 5         # Use this many items from recent logs
         self.fig, self.ax = plt.subplots()
         self.line, = self.ax.plot([], [], "o-")   # persistent line
 

@@ -48,7 +48,7 @@ class EnvPMSM(gym.Env):
 
         # Initial values
         self.id0 = 0
-        self.iq0 = 0
+        self.iq0 = 0.5
 
         # Measurement noise
         self.meas_noise = meas_noise
